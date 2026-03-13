@@ -1,13 +1,14 @@
-# 文件名：schemas.py
 from typing import List, Literal
 from pydantic import BaseModel, Field
 
-class SentimentAnalysis(BaseModel):
-    sentiment: Literal["正面", "负面", "中性"] = Field(description="用户的情感倾向")
-    summary: str = Field(description="一句简短的评论摘要")
-    keywords: List[str] = Field(description="核心关键词")
-    score: int = Field(description="情绪评分，1-10分")
+# 1. 第一步：从杂乱的新闻/反馈中提取出核心主体
+class ExtractedNews(BaseModel):
+    category: str = Field(description="行业或品类名称")
+    core_content: str = Field(description="去掉干扰信息后的核心行业动态或消费者反馈内容")
 
-class ExtractedReview(BaseModel):
-    category: str = Field(description="产品的品类，如：美妆、数码、食品等。如果用户没提到，请根据内容推测。")
-    review: str = Field(description="提取出来的纯用户评论内容，去除无关的礼貌用语或前缀。")
+# 2. 第二步：进行深度的趋势分析（符合实战作业要求）
+class TrendInsight(BaseModel):
+    category_name: str = Field(description="确定的品类名称")
+    market_trend: Literal["上升", "下降", "平稳"] = Field(description="市场趋势倾向")
+    consumer_pain_points: List[str] = Field(description="核心消费者痛点列表")
+    churn_risk: bool = Field(description="是否存在严重的流失风险预警（True/False）")
