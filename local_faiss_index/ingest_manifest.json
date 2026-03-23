@@ -1,0 +1,62 @@
+{
+  "manifest_version": 2,
+  "content_fingerprint": "bbe4a84ea651a823ae858925a785727e15c8c7a53d172ad97e88d0aa2b426374",
+  "embed_model": "BAAI/bge-m3",
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "recursive": false,
+  "docs_dir": "c:\\users\\rog\\desktop\\langchain_learnning\\sop_knowledge",
+  "files": {
+    "Digital Transformation, Advanced Optimization, and the Future of Standard Operating Procedures in an AI-Driven World.pdf": {
+      "sha256": "ad8a3e01b8813fcf966ab128130bad9ed4234f1d5451f50d883728f002060e7a",
+      "vector_ids": [
+        "eb05026e-001a-4531-bb25-b130506a7345",
+        "36b7ffef-d2ab-465b-b2a9-45084b2541d2",
+        "071b8de5-e533-4112-822e-2d46121fd2dc",
+        "755dfb81-a5cd-4a09-a80c-c31565c3c377",
+        "b54fed9c-7986-426c-a041-b3c9ec70beb3",
+        "3a89fc09-cd9c-41c6-9376-c3c06278e8ad",
+        "5f713acc-4731-480b-8a42-19570288064d",
+        "8d6da024-e668-4a75-bb99-884fadfc5dce",
+        "8754f28f-63b2-4e66-8fba-29b2441a761a",
+        "8698f38a-0167-4823-af7d-803ab6fab6e6",
+        "f950c86b-a45b-440d-a5d4-25e9d9e02235",
+        "a5a54829-cc0a-41b2-9688-55c6df3c9953",
+        "7e303a24-d154-4e7b-9fb8-9f0efd7af7e2"
+      ]
+    },
+    "The Architectural Design, Development Lifecycle, and Implementation Strategies for High-Impact SOPs.pdf": {
+      "sha256": "838824e383136a94e093ed6c563aaf2b5f06732eea567a6a5e744652e1243d30",
+      "vector_ids": [
+        "2e2567fd-7895-4fb6-99b6-1706289cb009",
+        "6d076a02-5172-4e1b-8de4-e48fadd42139",
+        "7cd90aa0-473a-40c0-9ec3-84ed7a0016e0",
+        "0af1537c-f825-4f58-821f-cce674510b6b",
+        "a4f1071f-c69e-4736-9477-8cfae8cc9443",
+        "cc5429e8-edef-4cd8-9818-9a2469e5f5df",
+        "402ebff9-b676-4a8e-8390-43134a172fc4",
+        "a1b14f40-95bc-4e89-a91d-e18083fa640b",
+        "7528d1aa-7fd7-4933-9765-aacd8c9d8911",
+        "5bd727af-fccf-40a9-aefe-f8611af02356",
+        "ac954fb3-9805-4674-9b85-8e69b463c564",
+        "e2a42bcc-00a7-4355-90cb-796aef75cc5c"
+      ]
+    },
+    "The Fundamental Framework, Strategic Imperative, and Organizational Psychology of Standard Operating Procedures (SOPs).pdf": {
+      "sha256": "4b3cac5e31acb097cf6b3bc32363783574ed1fe8a69a38ea81f671a23c94128e",
+      "vector_ids": [
+        "392f291d-c598-4290-9e02-34052fb7e7a0",
+        "c326e8d3-9bae-4a98-8f83-3eb9b91bd683",
+        "7d820ce5-be7b-4519-bc49-821d490269ac",
+        "682fd266-8c85-41b1-9911-33601fa0b202",
+        "702766e9-6d14-4901-a6f0-8ad89fcfbc47",
+        "93cc5842-e6bd-4454-a462-9b8220d66749",
+        "c2948f6c-a328-47e1-975f-3fc7241a45ce",
+        "08c5cfa3-0404-4a6f-8016-b675ff094726",
+        "6b9daf11-a88c-4ef3-8c61-97aa538c9ad0",
+        "7366757c-8bd2-4e17-a652-9095400f25cc",
+        "9498e5d2-83c4-4d70-8873-2bd6a66b1358"
+      ]
+    }
+  }
+}
