@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "content_fingerprint": "9f54bb33593cb394ccf609703f5d0d19c739a39d2bcbef9f8ee99b49933dd55f",
+  "embed_model": "BAAI/bge-m3",
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "recursive": false,
+  "docs_dir": "c:\\users\\rog\\desktop\\langchain_learnning\\w3\\sop_knowledge",
+  "files": {
+    "《S&OP 供应链绩效考核指标管理规范 (v2023)》.pdf": {
+      "sha256": "04af6a6dbe030b74936bfb2d98df1aa95e6b6ef62042bdf7322d3b82b541a391",
+      "vector_ids": [
+        "607849a9-0059-4251-bd87-086f85d65900",
+        "4fd56782-592b-4beb-aefa-d817ce7771d5",
+        "cb5a0e0f-b0d9-4b1d-935d-4fb1ed795ec7",
+        "14c736b4-8b0d-4e7c-9d77-2af88a69a31a",
+        "6ac03ef6-8f10-4bdd-ace0-60ca66895a51",
+        "b4cb645b-a915-4b7c-93b9-912dc8481f35",
+        "fd67b755-4239-4a8f-85cd-46b5574455db",
+        "35c8d98f-2abf-4fdb-9623-91de09169991",
+        "5ff2c9df-271c-4944-aa73-6e5d814e2065",
+        "da69f843-e8bc-4dba-b75f-29d57666a2fd",
+        "db7ee7cf-f41d-4b4a-82c2-ce4b87fd7eda",
+        "67e78428-00bf-4206-beb7-0e6e0a94c12f"
+      ]
+    },
+    "《S&OP 异常预警与跨部门协同审批流程管理办法》.pdf": {
+      "sha256": "881bb0375ce5ac09089e2af4bde4880802c82eb6d009bd1fa94528e28df4de5a",
+      "vector_ids": [
+        "6caae91a-5dc5-4bec-ade5-70e85c175830",
+        "1c6fc9cb-2b3d-4e94-81e0-6d1667b358f9",
+        "cd5a000a-4d84-4a52-aa9f-063d6e2a9d42",
+        "ae8fad76-3702-4c03-9a1d-3222d4bac997",
+        "7d7b27c9-a437-4616-95d5-07dc78f42f49",
+        "1e82fb14-8cde-4b8c-a585-f63f7635d726",
+        "d59a6df9-f21d-4b8d-b152-375277ffea7e",
+        "4077b0df-b7ca-42e5-be92-e515e5a31c07",
+        "b17d6174-8f8b-4d57-8ce3-e99adbbd3419"
+      ]
+    },
+    "《企业库存周转健康度与呆滞品（滞销）管理办法 (v2023)》.pdf": {
+      "sha256": "15b6d0f4f79086962c30188493dfd6b7bfdee74bfa26f6ebd9efdb18221f1c81",
+      "vector_ids": [
+        "abffa535-4213-4407-90c7-7b20bcfd8349",
+        "9064efef-5d50-4742-8f5e-a7d4d2183f7d",
+        "eb028985-1556-4770-8180-9d651526d3cf",
+        "a9b7dc9d-f572-4673-9327-b79b4c683e4b",
+        "1e55d5e5-8ee9-4bbd-81ad-c514f7a075ed",
+        "daf90921-122b-4dc1-9d1e-b1a9097a80e4",
+        "16740cca-9819-4a3e-8acc-3a022d0eeb05",
+        "df953aea-446e-45c2-a68a-923e62f933c2"
+      ]
+    }
+  }
+}

@@ -1,4 +1,7 @@
-"""环境变量与运行时参数集中管理。"""
+"""环境变量与运行时参数集中管理。
+
+默认知识库目录与向量库目录相对于本包所在「w3」根目录，便于整套 w3 拷贝到任意路径独立运行。
+"""
 
 from __future__ import annotations
 
@@ -7,11 +10,24 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+# w3/sop_hub/config.py -> w3 根目录
+_CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+_W3_ROOT = os.path.abspath(os.path.join(_CONFIG_DIR, ".."))
+
+load_dotenv(os.path.join(_W3_ROOT, ".env"))
 load_dotenv()
 
 
 def _b(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _default_docs_dir() -> str:
+    return os.path.join(_W3_ROOT, "sop_knowledge")
+
+
+def _default_vectorstore_dir() -> str:
+    return os.path.join(_W3_ROOT, "local_faiss_index")
 
 
 @dataclass
@@ -44,11 +60,11 @@ def load_settings(
     docs_dir: str | None = None,
     recursive: bool = False,
 ) -> Settings:
+    raw_docs = docs_dir or os.getenv("SOP_DOCS_DIR") or _default_docs_dir()
+    raw_vs = os.getenv("SOP_VECTORSTORE_DIR") or _default_vectorstore_dir()
     return Settings(
-        docs_dir=os.path.normpath(
-            os.path.abspath(docs_dir or os.getenv("SOP_DOCS_DIR", "sop_knowledge"))
-        ),
-        vectorstore_dir=os.getenv("SOP_VECTORSTORE_DIR", "local_faiss_index"),
+        docs_dir=os.path.normpath(os.path.abspath(raw_docs)),
+        vectorstore_dir=os.path.normpath(os.path.abspath(raw_vs)),
         recursive=recursive,
         chunk_size=int(os.getenv("SOP_CHUNK_SIZE", "500")),
         chunk_overlap=int(os.getenv("SOP_CHUNK_OVERLAP", "50")),
