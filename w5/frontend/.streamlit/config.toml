@@ -1,0 +1,10 @@
+# Streamlit 主题：偏「企业控制台」清爽风格，便于长对话阅读
+[theme]
+primaryColor = "#2563eb"
+backgroundColor = "#fafafa"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1e293b"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

@@ -51,6 +51,8 @@ def build_sop_tools(pipeline: HybridRerankPipeline, settings: Settings):
 
         参数 question：用自然语言描述完整的数据任务（可含时间、类目、区域等过滤条件）；
         若追问依赖上一轮数值，应把具体指标名和类目写清楚。
+        相对时间（如「上个月」）由内置时间上下文解析（默认假定「今天」为环境变量
+        SOP_ASSUMED_TODAY，未设置时为 2026-04-12，故「上个月」常对应 2026 年 3 月）。
 
         返回：基于表格计算的文字结果；若无 CSV 则返回说明。"""
         q = (question or "").strip()

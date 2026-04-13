@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
+
+if sys.platform == "win32":
+    try:
+        import ctypes
+
+        _hdl = ctypes.windll.kernel32.GetStdHandle(-11)
+        _mode = ctypes.c_uint32()
+        if ctypes.windll.kernel32.GetConsoleMode(_hdl, ctypes.byref(_mode)):
+            ctypes.windll.kernel32.SetConsoleMode(_hdl, _mode.value | 0x0004)
+    except Exception:
+        pass
 
 
 def _short(s: str, limit: int = 1800) -> str:
