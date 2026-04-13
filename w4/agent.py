@@ -13,6 +13,7 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
 from sop_hub.config import Settings
+from sop_hub.openai_http import chat_openai_http_kwargs
 
 # 与作业/数据脚本一致：data.csv 含 2026-03 等样本；可通过环境变量覆盖
 _ASSUMED_TODAY = os.getenv("SOP_ASSUMED_TODAY", "2026-04-12")
@@ -44,6 +45,7 @@ def build_agent_with_history(
         temperature=0,
         streaming=llm_streaming,
         request_timeout=req_timeout,
+        **chat_openai_http_kwargs(),
     )
     prompt = ChatPromptTemplate.from_messages(
         [

@@ -17,9 +17,27 @@ import streamlit as st
 DEFAULT_API = os.getenv("SOP_API_URL", "http://127.0.0.1:8000")
 
 
+def _tool_obs_display_limit() -> int:
+    try:
+        return max(400, int(os.getenv("SOP_TOOL_OBS_MAX_CHARS", "8000")))
+    except ValueError:
+        return 8000
+
+
+def _http_session(api_base: str) -> requests.Session:
+    """同一后端地址复用连接，减少每次问答的 TCP 握手开销。"""
+    key = "_sop_http_sess"
+    base = api_base.rstrip("/")
+    if st.session_state.get("_sop_http_base") != base or key not in st.session_state:
+        st.session_state[key] = requests.Session()
+        st.session_state["_sop_http_base"] = base
+    return st.session_state[key]
+
+
 def _fetch_session_history(api_base: str, session_id: str) -> list[dict]:
     try:
-        r = requests.get(
+        sess = _http_session(api_base)
+        r = sess.get(
             f"{api_base.rstrip('/')}/session/history",
             params={"session_id": session_id},
             timeout=30,
@@ -34,7 +52,8 @@ def _fetch_session_history(api_base: str, session_id: str) -> list[dict]:
 
 def _reset_backend_session(api_base: str, session_id: str) -> None:
     try:
-        r = requests.post(
+        sess = _http_session(api_base)
+        r = sess.post(
             f"{api_base.rstrip('/')}/session/reset",
             json={"session_id": session_id},
             timeout=30,
@@ -45,7 +64,8 @@ def _reset_backend_session(api_base: str, session_id: str) -> None:
 
 
 def _chat_non_stream(api_base: str, session_id: str, message: str) -> tuple[str, str]:
-    r = requests.post(
+    sess = _http_session(api_base)
+    r = sess.post(
         f"{api_base.rstrip('/')}/chat",
         json={"session_id": session_id, "message": message},
         timeout=600,
@@ -77,13 +97,14 @@ def _chat_stream(
     _last_flush = 0.0
     _last_flush_len = 0
     try:
-        _ui_min_interval = float(os.getenv("SOP_UI_STREAM_MIN_INTERVAL", "0.12"))
+        # 过小间隔会在 Streamlit 主线程频繁 markdown，阻塞 iter_lines 读 SSE，反压后端（体感极慢）
+        _ui_min_interval = float(os.getenv("SOP_UI_STREAM_MIN_INTERVAL", "0.35"))
     except ValueError:
-        _ui_min_interval = 0.12
+        _ui_min_interval = 0.35
     try:
-        _ui_min_chars = int(os.getenv("SOP_UI_STREAM_MIN_CHARS", "40"))
+        _ui_min_chars = int(os.getenv("SOP_UI_STREAM_MIN_CHARS", "160"))
     except ValueError:
-        _ui_min_chars = 40
+        _ui_min_chars = 160
 
     def _maybe_flush_tokens(*, force: bool = False) -> None:
         nonlocal _last_flush, _last_flush_len
@@ -94,8 +115,9 @@ def _chat_stream(
             _last_flush = now
             _last_flush_len = len(assistant)
 
+    sess = _http_session(api_base)
     url = f"{api_base.rstrip('/')}/chat/stream"
-    with requests.post(
+    with sess.post(
         url,
         json={"session_id": session_id, "message": message},
         stream=True,
@@ -122,9 +144,19 @@ def _chat_stream(
                 if tool_sidebar_placeholder is not None:
                     tool_sidebar_placeholder.markdown(tool_md)
             elif kind == "tool_end":
+                obs_raw = obj.get("observation") or ""
+                if not isinstance(obs_raw, str):
+                    obs_raw = str(obs_raw)
+                lim = _tool_obs_display_limit()
+                truncated = len(obs_raw) > lim
+                shown = obs_raw[:lim]
+                note = (
+                    f"\n_（共 {len(obs_raw)} 字，界面展示前 {lim} 字）_\n"
+                    if truncated
+                    else ""
+                )
                 tool_md += (
-                    f"\n**◀ `{obj.get('tool')}` 观测（截断）**\n```\n"
-                    f"{(obj.get('observation') or '')[:1500]}\n```\n"
+                    f"\n**◀ `{obj.get('tool')}` 观测**{note}\n```\n{shown}\n```\n"
                 )
                 tool_placeholder.markdown(tool_md)
                 if tool_sidebar_placeholder is not None:
@@ -178,7 +210,8 @@ if st.session_state.get("_history_api_base") != api_base:
 if st.session_state.get("_history_sync_sid") != st.session_state.session_id:
     st.session_state.messages = _fetch_session_history(api_base, st.session_state.session_id)
     st.session_state._history_sync_sid = st.session_state.session_id
-use_stream = st.sidebar.toggle("流式输出（SSE 打字机）", value=True)
+# 默认开：走 /chat/stream 才能看到 A 方案（astream_events）真 token；要快可关改走 POST /chat
+use_stream = st.sidebar.toggle("流式输出（SSE）", value=True)
 st.sidebar.caption(
     f"会话 ID：`{st.session_state.session_id}`\n\n"
     "刷新页面会保留对话（依赖 URL 中 `sid` 与后端进程未重启）。"
@@ -213,19 +246,20 @@ if prompt := st.chat_input("请输入您的问题…"):
     tool_md_acc = ""
     with st.chat_message("assistant"):
         ph = st.empty()
-        with st.expander("🔧 工具调用详情（本回合，随 SSE 更新）", expanded=True):
+        with st.expander("🔧 工具调用详情（本回合，随 SSE 更新）", expanded=False):
             tool_ph = st.empty()
         tool_ph.markdown("_等待模型与工具…_")
         tool_sidebar.markdown("_运行中…_")
         try:
             if use_stream:
+                # 流式时只刷新 expander，避免侧栏与展开区双份 markdown 拖死主线程
                 assistant_text, tool_md_acc = _chat_stream(
                     api_base,
                     st.session_state.session_id,
                     prompt,
                     ph,
                     tool_ph,
-                    tool_sidebar_placeholder=tool_sidebar,
+                    tool_sidebar_placeholder=None,
                 )
             else:
                 assistant_text, tool_md_acc = _chat_non_stream(
@@ -234,7 +268,13 @@ if prompt := st.chat_input("请输入您的问题…"):
                 ph.markdown(assistant_text)
                 tool_ph.markdown(tool_md_acc or "_本回合无工具记录_")
         except requests.HTTPError as e:
-            ph.error(f"HTTP 错误：{e}")
+            body = ""
+            if e.response is not None:
+                try:
+                    body = (e.response.text or "")[:2500]
+                except Exception:
+                    pass
+            ph.error(f"HTTP 错误：{e}\n\n{body}".strip())
             assistant_text = ""
             tool_md_acc = ""
         except requests.RequestException as e:

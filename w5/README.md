@@ -88,6 +88,9 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000
 | `SOP_FORCE_REBUILD` | 设为 `1` 时启动时强制重建向量索引 |
 | `SOP_CORS_ORIGINS` | 逗号分隔的允许源，默认 `*` |
 | `SOP_ASSUMED_TODAY` | 与 w4 一致，解析「上个月」等相对时间 |
+| `SOP_LLM_STREAMING` | 默认 `1`（A 方案：`ChatOpenAI` 流式）；设 `0` 可与 w4 CLI 非流式对齐、常更快 |
+| `SOP_SSE_ASTREAM_EVENTS` | 默认 `1`（A 方案：`astream_events` 真 token SSE）；设 `0` 则 `invoke` 后再 SSE 回放 |
+| `SOP_SSE_ASSISTANT_TYPING` | 默认 `0`；设 `1` 时在 invoke 回放路径下将正文切成多段 `token`（更像打字机，事件更多） |
 
 健康检查：<http://127.0.0.1:8000/health>
 
@@ -113,7 +116,7 @@ streamlit run app.py --server.port 8501
 浏览器打开：**<http://localhost:8501>**
 
 - 侧边栏可改后端地址（默认 `http://127.0.0.1:8000`）。
-- **流式输出**开关：开启时使用 `/chat/stream`（SSE）实现打字机效果；关闭时走 `/chat` 一次性返回（仍带 `tool_trace`）。
+- **流式输出**开关：默认**开启**，走 `/chat/stream`（SSE）；后端默认 **A 方案**（`astream_events` + 模型流式）。关闭时走 `/chat` 一次性返回（仍带 `tool_trace`）。
 - **新对话**会调用 `/session/reset` 并生成新的 `session_id`。
 
 也可通过环境变量指定 API：

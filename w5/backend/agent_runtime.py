@@ -99,3 +99,9 @@ def init_runtime(
         llm_streaming=llm_streaming,
     )
     return _runtime
+
+
+def reset_runtime() -> None:
+    """清空单例，便于基准脚本用不同 llm_streaming 重建（勿在生产请求路径调用）。"""
+    global _runtime
+    _runtime = None

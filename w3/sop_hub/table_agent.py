@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 
 from .config import Settings
 from . import document_io as dio
+from .openai_http import chat_openai_http_kwargs
 
 # 进程内缓存：避免每次 sop_data_analytics 都重新 read_csv（大表时很明显）。
 # 子 Agent 可能在 REPL 里改 df，故对外每次返回 deep copy，保留缓存中的「干净」副本。
@@ -100,6 +101,7 @@ def run_table_agent(question: str, settings: Settings) -> str:
         base_url=settings.base_url,
         temperature=0,
         request_timeout=req_timeout,
+        **chat_openai_http_kwargs(),
     )
     # 默认 ReAct 文本格式易被国产/聊天模型“直接作答”绕过，触发 OUTPUT_PARSING_FAILURE；
     # tool-calling 走结构化工具调用，更稳；handle_parsing_errors 作兜底。

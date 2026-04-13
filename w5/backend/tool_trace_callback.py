@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
+
+
+def _tool_obs_max_chars() -> int:
+    try:
+        return max(400, int(os.getenv("SOP_TOOL_OBS_MAX_CHARS", "8000")))
+    except ValueError:
+        return 8000
 
 
 def _short(s: str, limit: int = 1200) -> str:
@@ -25,7 +33,7 @@ class ListToolTraceCallback(BaseCallbackHandler):
     def on_tool_start(
         self,
         serialized: dict[str, Any],
-        input_str: str,
+        input_str: str = "",
         *,
         run_id: UUID,
         parent_run_id: UUID | None = None,
@@ -61,6 +69,6 @@ class ListToolTraceCallback(BaseCallbackHandler):
         self.entries.append(
             {
                 "phase": "end",
-                "observation": _short(text, 2000),
+                "observation": _short(text, _tool_obs_max_chars()),
             }
         )

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import time
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -15,7 +18,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from agent_runtime import get_runtime, init_runtime
+from perf_callbacks import LLMInvocationCounter
 from tool_trace_callback import ListToolTraceCallback
+
+_log = logging.getLogger("uvicorn.error")
 
 
 class ChatRequest(BaseModel):
@@ -27,16 +33,61 @@ class SessionResetRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
 
 
+def _message_content_str(m: object) -> str:
+    """兼容不同版本 LangChain：content 为 str / list[dict] 等。"""
+    if m is None:
+        return ""
+    t = getattr(m, "text", None)
+    if isinstance(t, str) and t.strip():
+        return t
+    c = getattr(m, "content", None)
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts: list[str] = []
+        for p in c:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                if p.get("type") == "text" and isinstance(p.get("text"), str):
+                    parts.append(p["text"])
+                elif isinstance(p.get("text"), str):
+                    parts.append(p["text"])
+        return "".join(parts)
+    return str(c) if c is not None else ""
+
+
+def _agent_invoke_output_text(out: object) -> str:
+    """AgentExecutor / Runnable 的 invoke 结果转成可 JSON 序列化的 str（避免 AIMessage 等导致 500）。"""
+    if out is None:
+        return ""
+    if isinstance(out, str):
+        return out
+    if isinstance(out, dict):
+        inner = out.get("output")
+        if inner is not None:
+            return _agent_invoke_output_text(inner)
+        try:
+            return json.dumps(out, ensure_ascii=False)
+        except TypeError:
+            return str(out)
+    if isinstance(out, (HumanMessage, AIMessage)) or hasattr(out, "content"):
+        return _message_content_str(out)
+    return str(out)
+
+
 def _ui_messages_from_history(messages: list) -> list[dict[str, str]]:
     """将 LangChain 记忆转成前端 ChatGPT 式 user/assistant 列表（跳过 tool 等）。"""
     rows: list[dict[str, str]] = []
     for m in messages:
         if isinstance(m, HumanMessage):
-            rows.append({"role": "user", "content": str(m.text)})
+            c = _message_content_str(m).strip()
+            if c:
+                rows.append({"role": "user", "content": c})
         elif isinstance(m, AIMessage):
-            text = str(m.text).strip()
-            if text:
-                rows.append({"role": "assistant", "content": str(m.text)})
+            c = _message_content_str(m).strip()
+            if c:
+                rows.append({"role": "assistant", "content": c})
     return rows
 
 
@@ -127,6 +178,29 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes")
 
 
+def _tool_obs_max_chars() -> int:
+    """工具观测写入 SSE / 与前端 SOP_TOOL_OBS_MAX_CHARS 对齐，避免无谓截断。"""
+    try:
+        return max(400, int(os.getenv("SOP_TOOL_OBS_MAX_CHARS", "8000")))
+    except ValueError:
+        return 8000
+
+
+def _exception_chain_detail(exc: BaseException, *, max_len: int = 8000) -> str:
+    """OpenAI/httpx 常把根因放在 __cause__，只 str(exc) 会得到笼统的 Connection error。"""
+    parts: list[str] = [f"{type(exc).__name__}: {exc}"]
+    cur: BaseException | None = exc.__cause__
+    for _ in range(8):
+        if cur is None:
+            break
+        parts.append(f"caused by: {type(cur).__name__}: {cur}")
+        cur = cur.__cause__
+    s = " | ".join(parts)
+    if len(s) > max_len:
+        return s[: max_len - 3] + "..."
+    return s
+
+
 async def _yield_assistant_reply_sse(text: str) -> AsyncIterator[str]:
     """仅对用户可见的最终回答做打字机式 SSE（多段 token）；不流式拆解工具观测等。
 
@@ -135,13 +209,14 @@ async def _yield_assistant_reply_sse(text: str) -> AsyncIterator[str]:
     """
     if not text:
         return
-    if not _env_flag("SOP_SSE_ASSISTANT_TYPING", default="1"):
+    # 默认关：48 字一块会产生海量 SSE 行，Streamlit iter_lines + markdown 会反压整条链路（比 w4 慢一个数量级）
+    if not _env_flag("SOP_SSE_ASSISTANT_TYPING", default="0"):
         yield _sse_payload({"type": "token", "text": text})
         return
     try:
-        chunk_sz = max(1, int(os.getenv("SOP_SSE_TYPING_CHARS", "48")))
+        chunk_sz = max(1, int(os.getenv("SOP_SSE_TYPING_CHARS", "8192")))
     except ValueError:
-        chunk_sz = 48
+        chunk_sz = 8192
     try:
         delay_ms = max(0, int(os.getenv("SOP_SSE_TYPING_DELAY_MS", "0")))
     except ValueError:
@@ -172,7 +247,9 @@ async def _invoke_parity_sse(session_id: str, message: str) -> AsyncIterator[str
     try:
         out = await asyncio.to_thread(run)
     except Exception as e:
-        yield _sse_payload({"type": "error", "message": str(e)})
+        _log.exception("SSE invoke_parity invoke failed")
+        msg = _exception_chain_detail(e, max_len=4000)
+        yield _sse_payload({"type": "error", "message": msg})
         return
 
     stack: list[str] = []
@@ -190,11 +267,12 @@ async def _invoke_parity_sse(session_id: str, message: str) -> AsyncIterator[str
             if not _tool_visible(t):
                 continue
             obs = str(row.get("observation") or "")
+            mobs = _tool_obs_max_chars()
             yield _sse_payload(
-                {"type": "tool_end", "tool": t, "observation": obs[:4000]}
+                {"type": "tool_end", "tool": t, "observation": obs[:mobs]}
             )
 
-    text = out.get("output") if isinstance(out, dict) else str(out)
+    text = _agent_invoke_output_text(out)
     if text:
         async for line in _yield_assistant_reply_sse(text):
             yield line
@@ -207,8 +285,8 @@ async def _agent_event_stream(session_id: str, message: str) -> AsyncIterator[st
     stream_chars = 0
     # list 以便在闭包/辅助函数中可变
     fallback_sent: list[bool] = [False]
-    # 默认与命令行一致：走 invoke；若需真实 token 流式再设 SOP_SSE_ASTREAM_EVENTS=1
-    if not _env_flag("SOP_SSE_ASTREAM_EVENTS", default="0"):
+    # 默认 A 方案：astream_events 真 token；若需与 w4 invoke 同路径可设 SOP_SSE_ASTREAM_EVENTS=0
+    if not _env_flag("SOP_SSE_ASTREAM_EVENTS", default="1"):
         async for line in _invoke_parity_sse(session_id, message):
             yield line
         return
@@ -278,17 +356,20 @@ async def _agent_event_stream(session_id: str, message: str) -> AsyncIterator[st
                 data = ev.get("data") or {}
                 out = data.get("output")
                 obs = out if isinstance(out, str) else (str(out) if out is not None else "")
+                mobs = _tool_obs_max_chars()
                 yield _sse_payload(
                     {
                         "type": "tool_end",
                         "tool": name,
-                        "observation": obs[:4000],
+                        "observation": obs[:mobs],
                     }
                 )
 
         yield _sse_payload({"type": "done"})
     except Exception as e:
-        yield _sse_payload({"type": "error", "message": str(e)})
+        yield _sse_payload(
+            {"type": "error", "message": _exception_chain_detail(e, max_len=4000)}
+        )
 
 
 @asynccontextmanager
@@ -296,14 +377,25 @@ async def lifespan(app: FastAPI):
     docs_dir = os.getenv("SOP_DOCS_DIR") or None
     recursive = os.getenv("SOP_RECURSIVE", "").lower() in ("1", "true", "yes")
     force_rebuild = os.getenv("SOP_FORCE_REBUILD", "").lower() in ("1", "true", "yes")
-    # 与 w4 命令行默认一致：主模型非流式；SSE 默认用 invoke 回放（见 SOP_SSE_ASTREAM_EVENTS）
-    llm_streaming = _env_flag("SOP_LLM_STREAMING", default="0")
+    # 默认 A 方案：主模型 streaming=True 供 on_chat_model_stream；追求 w4 速度可设 SOP_LLM_STREAMING=0
+    llm_streaming = _env_flag("SOP_LLM_STREAMING", default="1")
+    sse_astream = _env_flag("SOP_SSE_ASTREAM_EVENTS", default="1")
+    sse_typing = _env_flag("SOP_SSE_ASSISTANT_TYPING", default="0")
     await asyncio.to_thread(
         init_runtime,
         docs_dir=docs_dir,
         recursive=recursive,
         force_rebuild=force_rebuild,
         llm_streaming=llm_streaming,
+    )
+    httpx_te = os.getenv("SOP_HTTPX_TRUST_ENV", "1")
+    print(
+        "[sop-hub-v5] runtime: "
+        f"SOP_LLM_STREAMING={int(llm_streaming)} "
+        f"SOP_SSE_ASTREAM_EVENTS={int(sse_astream)} "
+        f"SOP_SSE_ASSISTANT_TYPING={int(sse_typing)} "
+        f"SOP_HTTPX_TRUST_ENV={httpx_te!r} (若 Connection error 可试设为 0 忽略系统代理)",
+        flush=True,
     )
     yield
 
@@ -328,6 +420,71 @@ async def health():
     return {"status": "ok", "service": "sop-hub-v5"}
 
 
+@app.post("/debug/timing")
+async def debug_timing(
+    req: ChatRequest,
+    include_astream: bool = Query(
+        False,
+        description="额外跑一遍 astream_events 并统计事件量（多一次完整 Agent 费用）",
+    ),
+):
+    """启用：SOP_DEBUG_TIMING=1。返回 invoke 墙钟与 LLM/工具启动次数；可选对比 astream_events。"""
+    if not _env_flag("SOP_DEBUG_TIMING", default="0"):
+        raise HTTPException(status_code=403, detail="Set environment variable SOP_DEBUG_TIMING=1 to enable.")
+
+    rt = get_runtime()
+    cb = LLMInvocationCounter()
+    cfg: dict = {"configurable": {"session_id": req.session_id}, "callbacks": [cb]}
+
+    def run():
+        return rt.agent.invoke({"input": req.message}, config=cfg)
+
+    t0 = time.perf_counter()
+    try:
+        out = await asyncio.to_thread(run)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=_exception_chain_detail(e)
+        ) from e
+    invoke_s = time.perf_counter() - t0
+    text = _agent_invoke_output_text(out)
+
+    body: dict = {
+        "session_id": req.session_id,
+        "invoke_seconds": round(invoke_s, 4),
+        "llm_starts": cb.llm_starts,
+        "tool_starts": cb.tool_starts,
+        "output_chars": len(text or ""),
+    }
+
+    if include_astream:
+        sid2 = f"{req.session_id}-debug-astream"
+        cb2 = LLMInvocationCounter()
+        cfg2: dict = {"configurable": {"session_id": sid2}, "callbacks": [cb2]}
+        kinds: Counter[str] = Counter()
+        t1 = time.perf_counter()
+        try:
+            async for ev in rt.agent.astream_events(
+                {"input": req.message},
+                config=cfg2,
+                version="v2",
+            ):
+                k = ev.get("event")
+                if isinstance(k, str):
+                    kinds[k] += 1
+        except Exception as e:
+            body["astream_error"] = str(e)
+        else:
+            body["astream_seconds"] = round(time.perf_counter() - t1, 4)
+            body["astream_llm_starts"] = cb2.llm_starts
+            body["astream_tool_starts"] = cb2.tool_starts
+            body["astream_event_total"] = int(sum(kinds.values()))
+            body["astream_on_chat_model_stream"] = int(kinds.get("on_chat_model_stream", 0))
+            body["astream_event_top"] = dict(kinds.most_common(15))
+
+    return body
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest):
     """非流式：完整回答 + 工具轨迹（便于 Postman / curl）。"""
@@ -344,9 +501,13 @@ async def chat(req: ChatRequest):
     try:
         out = await asyncio.to_thread(run)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        _log.exception("POST /chat invoke failed")
+        raise HTTPException(
+            status_code=500,
+            detail=_exception_chain_detail(e),
+        ) from e
 
-    text = out.get("output") if isinstance(out, dict) else str(out)
+    text = _agent_invoke_output_text(out)
     return {
         "session_id": req.session_id,
         "output": text,
