@@ -1,0 +1,8 @@
+# 安装顺序：先装仓库根目录 requirements.txt，再装本文件。
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# MySQL 持久化记忆 + Text-to-SQL Agent
+sqlalchemy>=2.0.0
+PyMySQL>=1.1.0
+cryptography>=42.0.0  # PyMySQL 在 caching_sha2_password 鉴权时需要
