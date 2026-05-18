@@ -46,6 +46,15 @@ class SessionResetRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
 
 
+class GraphResumeRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, description="LangGraph 线程 ID（建议与会话 ID 一致）")
+    decision: str = Field(
+        ...,
+        min_length=1,
+        description="人工审批输入：approved/rejected/revise（也支持同意/驳回/修改）",
+    )
+
+
 # ----------------------------------------------------------------------------- 工具函数
 
 def _message_content_str(m: object) -> str:
@@ -206,6 +215,25 @@ def _exception_chain_detail(exc: BaseException, *, max_len: int = 8000) -> str:
     if len(s) > max_len:
         return s[: max_len - 3] + "..."
     return s
+
+
+def _graph_state_brief(result: dict) -> dict:
+    st = result.get("state") or {}
+    if not isinstance(st, dict):
+        st = {}
+    return {
+        "route_plan": st.get("route_plan"),
+        "intent": st.get("intent"),
+        "requires_human_approval": bool(st.get("requires_human_approval", False)),
+        "approval_decision": st.get("approval_decision"),
+        "has_sql_result": bool((st.get("sql_result") or "").strip() if isinstance(st.get("sql_result"), str) else st.get("sql_result")),
+        "has_compliance_result": bool(
+            (st.get("compliance_result") or "").strip()
+            if isinstance(st.get("compliance_result"), str)
+            else st.get("compliance_result")
+        ),
+        "node_trace_len": len(result.get("node_trace") or []),
+    }
 
 
 # ----------------------------------------------------------------------------- SSE
@@ -377,12 +405,17 @@ async def lifespan(app: FastAPI):
         force_rebuild=force_rebuild,
         llm_streaming=llm_streaming,
     )
+    rt = get_runtime()
+    graph_mode = rt.graph_runtime.checkpointer_mode
+    graph_ckpt = rt.graph_runtime.checkpoint_path or "(memory)"
     httpx_te = os.getenv("SOP_HTTPX_TRUST_ENV", "1")
     print(
         "[sop-hub-v6] runtime: "
         f"SOP_LLM_STREAMING={int(llm_streaming)} "
         f"SOP_SSE_ASTREAM_EVENTS={int(sse_astream)} "
         f"SOP_SSE_ASSISTANT_TYPING={int(sse_typing)} "
+        f"SOP_LANGGRAPH_CHECKPOINTER={graph_mode} "
+        f"SOP_LANGGRAPH_CHECKPOINT_PATH={graph_ckpt!r} "
         f"SOP_HTTPX_TRUST_ENV={httpx_te!r} "
         "(MySQL 持久化记忆 + Text-to-SQL 工具 已启用)",
         flush=True,
@@ -504,6 +537,112 @@ async def chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/graph/chat")
+async def graph_chat(req: ChatRequest):
+    """LangGraph 多智能体入口：按 supervisor 条件路由执行，可能触发中断。"""
+    rt = get_runtime()
+    try:
+        result = await asyncio.to_thread(
+            rt.graph_runtime.invoke,
+            req.session_id,
+            req.message,
+        )
+    except Exception as e:
+        _log.exception("POST /graph/chat failed")
+        raise HTTPException(status_code=500, detail=_exception_chain_detail(e)) from e
+
+    return {
+        "session_id": req.session_id,
+        "status": result.get("status"),
+        "output": result.get("output"),
+        "interrupt": result.get("interrupt"),
+        "node_trace": result.get("node_trace", []),
+        "brief": _graph_state_brief(result),
+    }
+
+
+@app.post("/graph/resume")
+async def graph_resume(req: GraphResumeRequest):
+    """恢复被 interrupt 挂起的 LangGraph 线程。"""
+    rt = get_runtime()
+    try:
+        result = await asyncio.to_thread(
+            rt.graph_runtime.resume,
+            req.session_id,
+            req.decision,
+        )
+    except Exception as e:
+        _log.exception("POST /graph/resume failed")
+        raise HTTPException(status_code=500, detail=_exception_chain_detail(e)) from e
+
+    return {
+        "session_id": req.session_id,
+        "status": result.get("status"),
+        "output": result.get("output"),
+        "interrupt": result.get("interrupt"),
+        "node_trace": result.get("node_trace", []),
+        "brief": _graph_state_brief(result),
+    }
+
+
+@app.get("/graph/state")
+async def graph_state(session_id: str = Query(..., min_length=1)):
+    """读取 LangGraph 线程快照，便于调试节点输入/输出状态。"""
+    rt = get_runtime()
+    try:
+        result = await asyncio.to_thread(rt.graph_runtime.get_state, session_id)
+    except Exception as e:
+        _log.exception("GET /graph/state failed")
+        raise HTTPException(status_code=500, detail=_exception_chain_detail(e)) from e
+    return {
+        "session_id": session_id,
+        "status": result.get("status"),
+        "output": result.get("output"),
+        "interrupt": result.get("interrupt"),
+        "node_trace": result.get("node_trace", []),
+        "brief": _graph_state_brief(result),
+        "state": result.get("state", {}),
+    }
+
+
+@app.get("/session/list")
+async def session_list(limit: int = Query(30, ge=1, le=200)):
+    """读取最近会话，用于运维与前端会话切换。"""
+    rt = get_runtime()
+    sessions = await asyncio.to_thread(rt.list_sessions, limit)
+    return {"items": sessions, "count": len(sessions)}
+
+
+@app.get("/graph/pending_approvals")
+async def graph_pending_approvals(limit: int = Query(30, ge=1, le=200)):
+    """返回最近会话中处于 LangGraph interrupt 等待审批的线程。"""
+    rt = get_runtime()
+    sessions = await asyncio.to_thread(rt.list_sessions, limit)
+    items: list[dict] = []
+    for row in sessions:
+        sid = str((row or {}).get("session_id") or "").strip()
+        if not sid:
+            continue
+        try:
+            result = await asyncio.to_thread(rt.graph_runtime.get_state, sid)
+        except Exception:
+            continue
+        if result.get("status") != "interrupted":
+            continue
+        intr = result.get("interrupt") or {}
+        items.append(
+            {
+                "session_id": sid,
+                "messages": int((row or {}).get("messages") or 0),
+                "last_id": int((row or {}).get("last_id") or 0),
+                "reason": intr.get("reason"),
+                "hint": intr.get("hint"),
+                "brief": _graph_state_brief(result),
+            }
+        )
+    return {"items": items, "count": len(items)}
 
 
 @app.post("/session/reset")

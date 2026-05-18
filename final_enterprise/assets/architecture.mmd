@@ -1,0 +1,24 @@
+flowchart TD
+    S[supervisor_node]
+    S -->|out_of_scope| O[out_of_scope_node]
+    S --> D[data_analyst_node]
+    S --> C[compliance_expert_node]
+    S -.-> D
+
+    D --> C
+    D --> DR[synthesis_draft_node]
+    C --> DR
+
+    DR -->|needs review| H[review_gate_node]
+    DR -->|no review| F[finalize_node]
+    H -->|approved| F
+    H -->|rejected| R[reject_finalize_node]
+    H -->|feedback| RV[revise_with_feedback_node]
+    RV --> H
+
+    %% red=data_only, blue=compliance_only, green=mixed(data+compliance)
+    linkStyle 1 stroke:#d63031,stroke-width:3px
+    linkStyle 2 stroke:#1e6de8,stroke-width:3px
+    linkStyle 3 stroke:#2e9f43,stroke-width:3px,stroke-dasharray:6 4
+    linkStyle 4 stroke:#2e9f43,stroke-width:3px
+    linkStyle 5 stroke:#d63031,stroke-width:3px

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,7 @@ from sop_hub.retriever import HybridRerankPipeline  # noqa: E402
 from w4.agent import build_agent_with_history  # noqa: E402
 from w4.tools import build_sop_tools  # noqa: E402
 
+from langgraph_workflow import GraphRuntime, build_graph_runtime  # noqa: E402
 from sql_agent_tool import build_sop_database_query_tool  # noqa: E402
 from sql_history import (  # noqa: E402
     clear_session as _clear_session,
@@ -61,12 +63,23 @@ from sql_history import (
 from sql_history import (
     read_messages as _read_messages,
 )
+from sql_history import list_sessions as _list_sessions
+
+
+def _ensure_utf8_stdio() -> None:
+    """Windows 控制台默认 GBK 时，避免下游模块 print emoji 触发 UnicodeEncodeError。"""
+    try:
+        if isinstance(sys.stdout, io.TextIOBase):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 @dataclass
 class AgentRuntime:
     settings: Settings
     agent: object  # RunnableWithMessageHistory
+    graph_runtime: GraphRuntime
 
     def get_session_history(self, session_id: str) -> BaseChatMessageHistory:
         return _get_session_history(session_id)
@@ -77,6 +90,9 @@ class AgentRuntime:
     def clear_session(self, session_id: str) -> None:
         _clear_session(session_id)
 
+    def list_sessions(self, limit: int = 50):
+        return _list_sessions(limit)
+
 
 def _bootstrap(
     *,
@@ -85,6 +101,7 @@ def _bootstrap(
     force_rebuild: bool,
     llm_streaming: bool,
 ) -> AgentRuntime:
+    _ensure_utf8_stdio()
     settings = load_settings(docs_dir=docs_dir, recursive=recursive)
     if not settings.api_key or not settings.base_url:
         raise RuntimeError("请在仓库 w3/.env 或环境变量中配置 api_key 与 base_url")
@@ -111,6 +128,11 @@ def _bootstrap(
 
     sop_database_query_tool = build_sop_database_query_tool(settings)
     tools = [sop_document_search, sop_database_query_tool]
+    graph_runtime = build_graph_runtime(
+        settings,
+        sop_database_query_tool=sop_database_query_tool,
+        sop_document_search_tool=sop_document_search,
+    )
 
     agent = build_agent_with_history(
         settings,
@@ -118,7 +140,7 @@ def _bootstrap(
         _get_session_history,
         llm_streaming=llm_streaming,
     )
-    return AgentRuntime(settings=settings, agent=agent)
+    return AgentRuntime(settings=settings, agent=agent, graph_runtime=graph_runtime)
 
 
 _runtime: AgentRuntime | None = None
@@ -149,4 +171,9 @@ def init_runtime(
 
 def reset_runtime() -> None:
     global _runtime
+    if _runtime is not None:
+        try:
+            _runtime.graph_runtime.close()
+        except Exception:
+            pass
     _runtime = None

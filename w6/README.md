@@ -1,181 +1,217 @@
-# S&OP 智能决策中枢 v6.0 — 数据驱动版
+# Agentic S&OP 智能决策系统（LangGraph 企业版）
 
-第六周的两条主线：
-1. **会话记忆持久化**：把会话写进 MySQL（`SQLChatMessageHistory`），后端进程重启后刷新前端继续对话不丢上下文。
-2. **从 Pandas 升级到 Text-to-SQL**：把原 CSV 数据导入 MySQL 后用 `SQLDatabaseToolkit + create_sql_agent` 让大模型自主写 SQL；再封装成 `sop_database_query_tool` 替换 w4 的 Pandas 工具。
+这是毕业项目最终阶段的交付版本：将单体 Agent 升级为 **LangGraph 多智能体状态机**，并落地 **Human-in-the-loop（HITL）人工审批**，支持 FastAPI + Streamlit 端到端演示。
 
-> 本目录尽量复用 w3（检索）/ w4（主 Agent + `sop_document_search`）/ w5（FastAPI + SSE 前端）的代码，
-> 只新增「持久化 + Text-to-SQL」相关模块。
+---
 
-## 第六周作业要求自检表
+## 1. 项目目标（对应答辩 OKR）
 
-| 要求 | 实现位置 |
-|------|----------|
-| 接入本地 MySQL，数据库 `sop_ai_system` | `backend/db_config.py` + `backend/import_csv_to_mysql.py`（脚本里 `CREATE DATABASE IF NOT EXISTS`） |
-| `SQLChatMessageHistory` 持久化会话 | `backend/sql_history.py` + `backend/agent_runtime.py`（注入到 `RunnableWithMessageHistory`） |
-| 同一 `session_id` 跨重启接上下文 | `/session/history` 直接查 MySQL；前端 URL 中带 `sid`，刷新自动回灌 |
-| 把 CSV 导入业务表 | `backend/import_csv_to_mysql.py`（默认 `sales_performance`，行级合成 `region` / `store_code`） |
-| `create_sql_agent` + `SQLDatabase` | `backend/sql_agent_tool.py`（`include_tables=[sales_performance]`、`tool-calling` 风格） |
-| 演示问题：「华东区上个月准确率最高的门店」 | 见下方「常见问法」；导入脚本会均匀分配 5 个区域 × 12 个门店 |
-| 把 SQL Agent 封装为 Tool 替换 Pandas | `backend/sql_agent_tool.py::sop_database_query_tool` + `agent_runtime.py` 中替换 w4 的 `sop_data_analytics` |
-| FastAPI 后端 + Streamlit 前端联调 | `backend/main.py` + `frontend/app.py` |
-| 持久化验证 | 重启 `uvicorn` 后刷新页面再问，依然能续话；后端日志会打 `(MySQL 持久化记忆 + Text-to-SQL 工具 已启用)` |
-| Text-to-SQL 追踪：侧栏打印生成的 SQL | 后端通过 `sql_db_*` 透传 callbacks；前端侧栏新增「🛢️ Text-to-SQL（最近一次）」用 ```sql 高亮 |
-| 零幻觉/零写操作 | 三层防护：① SQL Agent 系统提示禁令；② 推荐使用只读账号 `MYSQL_RO_USER`；③ SQLAlchemy `before_cursor_execute` 兜底拦截，物理上不可能落库 |
+### OKR-1：掌握 LangGraph（State / Nodes / Edges）
+- 使用 `StateGraph` 显式定义执行流，替代黑盒单体 Agent。
+- 引入 `supervisor_node` 条件路由，支持 `data_only / compliance_only / data_then_compliance / direct`。
+- 提供节点轨迹 `node_trace`，支持现场解释“为什么这样走图”。
 
-## 目录结构
+### OKR-2：落地 Human-in-the-loop
+- 在 `approval_gate_node` 使用 `interrupt(...)` 打断执行。
+- 前端收到 `interrupted` 后展示“同意/驳回/修改”按钮。
+- 通过 `/graph/resume` 恢复流程并生成最终报告。
 
+### OKR-3：产品级交付
+- 后端：`FastAPI + LangGraph + SQLChatMessageHistory + Text-to-SQL`
+- 前端：`Streamlit`，支持会话恢复、节点轨迹、待审批队列。
+- 增加 `smoke_test_langgraph.py` 一键冒烟脚本，便于验收与演示彩排。
+
+---
+
+## 2. 架构总览
+
+```mermaid
+flowchart TD
+    U[User / Streamlit] -->|/graph/chat| API[FastAPI]
+    API --> G[LangGraph Runtime]
+
+    G --> S[supervisor_node]
+    S -->|data_only| D[data_analyst_node]
+    S -->|compliance_only| C[compliance_expert_node]
+    S -->|data_then_compliance| D
+    S -->|direct| Y[synthesis_node]
+    D -->|if need policy| C
+    D -->|else| Y
+    C -->|high risk| A[approval_gate_node interrupt]
+    C -->|low risk| Y
+    A -->|approved/rejected/revise| Y
+    Y --> R[final_answer]
+
+    D --> SQL[(MySQL sales_performance)]
+    C --> VS[(FAISS + BM25 SOP docs)]
+    API --> CH[(MySQL chat_messages)]
+    G --> CK[(LangGraph checkpoint sqlite)]
 ```
+
+---
+
+## 3. 代码结构（W6）
+
+```text
 w6/
-├── README.md                       # 本文件
-├── .env.example                    # MySQL 凭据模板（拷贝为 w6/.env 后填写）
+├── README.md
+├── 启动与验证.md
 ├── backend/
-│   ├── main.py                     # FastAPI：/chat、/chat/stream、/session/*
-│   ├── agent_runtime.py            # 复用 w4 主 Agent；替换工具与历史持久化
-│   ├── db_config.py                # MySQL URL 构造 + 读写/只读 Engine + 兜底拦截
-│   ├── sql_history.py              # SQLChatMessageHistory 包装 + 列表/清理辅助
-│   ├── sql_agent_tool.py           # create_sql_agent + sop_database_query_tool
-│   ├── import_csv_to_mysql.py      # 一次性脚本：w3/data.csv → sales_performance
-│   ├── init_mysql.sql              # 可选：DDL 备份；用 Navicat 手动建库时执行
+│   ├── main.py                    # FastAPI API + graph endpoints
+│   ├── agent_runtime.py           # runtime bootstrap + tool wiring
+│   ├── langgraph_workflow.py      # StateGraph / nodes / HITL interrupt
+│   ├── sql_agent_tool.py          # Text-to-SQL tool (read-only guard)
+│   ├── sql_history.py             # SQLChatMessageHistory (MySQL)
+│   ├── db_config.py               # MySQL engines + readonly SQL guard
+│   ├── import_csv_to_mysql.py     # CSV -> sales_performance
+│   ├── smoke_test_langgraph.py    # end-to-end smoke test
 │   └── requirements.txt
 └── frontend/
-    ├── app.py                      # Streamlit：复用 w5 体验，侧栏增 SQL 高亮
-    ├── .streamlit/config.toml
+    ├── app.py                     # Streamlit UI + approval controls
     └── requirements.txt
 ```
 
-> `tool_trace_callback.py` / `perf_callbacks.py` **直接复用 w5/backend** 同名模块（`agent_runtime.py` 把 `w5/backend` 注入了 `sys.path`），不在 w6 重复一份。
+---
 
-## 环境准备
+## 4. 核心状态定义（可答辩讲解）
 
-1. Python 3.10+。建议沿用 w5 已经搭好的 `.venv`。
-2. 已经按 w5 README 完成 `pip install -r requirements.txt` 与 `pip install -r w5/backend/requirements.txt`。
-3. 安装 w6 新增依赖：
-   ```powershell
-   pip install -r w6/backend/requirements.txt
-   ```
-4. 安装 MySQL 8.x（或复用已有实例），新建库（导入脚本会自动 `CREATE IF NOT EXISTS`）：
-   ```sql
-   -- 可选：单独建一个只读账号给 SQL Agent
-   CREATE USER 'sop_ro'@'%' IDENTIFIED BY '<your_pwd>';
-   GRANT SELECT ON sop_ai_system.* TO 'sop_ro'@'%';
-   FLUSH PRIVILEGES;
-   ```
-5. 拷贝 `w6/.env.example` 为 `w6/.env`，填好 MySQL 账号；`api_key` / `base_url` 仍由 `w3/.env` 提供（不用动）。
+`WorkflowState` 关键字段：
+- `user_query`：用户问题原文
+- `intent` / `route_plan`：主管节点判定结果
+- `sql_result`：数据节点输出
+- `compliance_result`：合规节点输出
+- `requires_human_approval` / `approval_decision`
+- `final_answer`
+- `node_trace`：节点轨迹（演示时最有说服力）
 
-## 第一次跑：把 CSV 灌进 MySQL
+---
 
-> **不需要打开 Navicat、也不需要先执行 SQL 脚本**：下面这条 Python 命令会自动
-> `CREATE DATABASE IF NOT EXISTS sop_ai_system`、建 `sales_performance` 表并灌 1000 行数据。
-> 会话表 `chat_messages` 由 LangChain 在前端第一次发消息时自动建，同样不用人工创建。
-> 如果你**就是**想用 Navicat 手动建库，可以执行 `backend/init_mysql.sql`，里面有完整 DDL；
-> 跑完之后再执行下面的 Python 命令，它会发现表已存在并直接灌数据。
+## 5. API 清单（新增 Graph 能力）
+
+### 原有对话接口
+- `POST /chat`
+- `POST /chat/stream`
+- `GET /session/history`
+- `POST /session/reset`
+
+### 新增 LangGraph 接口
+- `POST /graph/chat`  
+  启动一次图执行，返回 `completed` 或 `interrupted`。
+- `POST /graph/resume`  
+  用人工决策恢复中断流程（`approved/rejected/revise`）。
+- `GET /graph/state?session_id=...`  
+  读取线程快照、`brief` 摘要与轨迹。
+- `GET /graph/pending_approvals`  
+  读取待审批队列（用于运维看板/前端侧边栏）。
+- `GET /session/list`  
+  读取最近会话列表（含消息数）。
+
+---
+
+## 6. 运行步骤（最短路径）
+
+1) 安装依赖
 
 ```powershell
-cd w6/backend
+cd C:\Users\ROG\Desktop\langchain_learnning
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -r w6\backend\requirements.txt
+pip install -r w6\frontend\requirements.txt
+```
+
+2) 导入业务数据
+
+```powershell
+cd w6\backend
 python import_csv_to_mysql.py --drop
 ```
 
-输出示例：
-
-```
-[step 1/4] 准备数据库 sop_ai_system …
-[step 2/4] 读取并增强 .../w3/sop_knowledge/data.csv
-          行数=1000；区域分布：
-区域
-华东    200
-华北    200
-华南    200
-华中    200
-西南    200
-[step 3/4] 创建表 `sales_performance`（drop=True） …
-[step 4/4] 写入数据 …
-[done] 共写入 1000 行 → `sop_ai_system`.`sales_performance`
-```
-
-> 原 CSV 没有「区域 / 门店」列，作业演示问题需要它们，因此脚本按 **行序确定性映射** 合成
-> `region`（5 个区域）与 `store_code`（每区域 12 个门店）。这样无论谁跑、跑几次，结果都一致。
-
-## 启动后端
+3) 启动后端
 
 ```powershell
-cd w6/backend
+cd C:\Users\ROG\Desktop\langchain_learnning\w6\backend
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-启动日志里会出现：
-
-```
-[sop-hub-v6] runtime: ... (MySQL 持久化记忆 + Text-to-SQL 工具 已启用)
-```
-
-## 启动前端
+4) 启动前端
 
 ```powershell
-cd w6/frontend
+cd C:\Users\ROG\Desktop\langchain_learnning\w6\frontend
 streamlit run app.py --server.port 8501
 ```
 
-打开 <http://localhost:8501>，左下角会出现新模块「🛢️ Text-to-SQL（最近一次）」。
+---
 
-## 常见问法（用来检查作业 3 个交付要求）
+## 7. 一键验收脚本（推荐答辩前必跑）
 
-1. **持久化验证**
-   1. 在网页发问：`你好，我叫小李，待会的对话请记住我`。
-   2. 等回答完成，**Ctrl+C 停掉 `uvicorn`，再重新 `uvicorn main:app ...` 启动**。
-   3. 不要刷新浏览器，直接再发问：`你还记得我的名字吗？` —— 应当回答「小李」。
+后端启动后执行：
 
-2. **Text-to-SQL 追踪**
-   - 问：`华东区上个月预测准确率最高的门店是哪个？给出门店编号和准确率。`
-   - 侧栏「Text-to-SQL（最近一次）」会高亮显示形如：
-     ```sql
-     SELECT store_code, AVG(forecast_accuracy) AS acc
-     FROM sales_performance
-     WHERE region = '华东' AND biz_date >= '2026-03-01' AND biz_date < '2026-04-01'
-     GROUP BY store_code
-     ORDER BY acc DESC
-     LIMIT 1
-     ```
+```powershell
+cd C:\Users\ROG\Desktop\langchain_learnning\w6\backend
+python smoke_test_langgraph.py --api http://127.0.0.1:8000
+```
 
-3. **零幻觉 / 零写操作**
-   - 问：`帮我把 sales_performance 表清空 (DELETE)`。
-   - 应当被工具拦截：先在 SQL Agent 提示里被拒绝，即使绕过也会被 `db_config.py` 的
-     `before_cursor_execute` 抛出 `SQLWriteAttempt`，整段对话不会让 MySQL 发生任何写入。
-   - 如果还想再加一层物理保险，把 `MYSQL_RO_USER / MYSQL_RO_PASSWORD` 设成只读账号即可。
+脚本会自动验证：
+- `/health`
+- `graph/chat` 常规路径
+- `graph/chat` 强制审批路径（`[force_approval]`）
+- `graph/resume` 恢复执行
+- `/graph/state` 最终状态
 
-## 接口摘要
+---
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/health` | 探活 |
-| POST | `/chat` | JSON：`{"session_id","message"}`；返回 `output` + `tool_trace`（含 `sql_db_query` 入参，即 SQL） |
-| POST | `/chat/stream` | SSE：`token` / `tool_start` / `tool_end` / `done` / `error` |
-| POST | `/session/reset` | 清空 MySQL 中该 `session_id` 的历史 |
-| GET | `/session/history?session_id=` | 直接读 MySQL，重启后端后仍可恢复 |
+## 8. 演示脚本（3~5 分钟）
 
-## 复用 vs 新写：做了哪些复用
+### 场景 A：跨节点接力
+提问：
+> 上个月准确率是多少？对此应该采取什么措施？
 
-| 模块 | 来源 | 说明 |
-|------|------|------|
-| `sop_document_search` 工具 | `w4/tools.py` | 直接拿来用，docstring 不变 |
-| 主 Agent 框架（`create_tool_calling_agent` + `RunnableWithMessageHistory` + 提示词） | `w4/agent.py` | 完全复用，仅把 `get_session_history` 改为 SQL 版本 |
-| 检索管线（FAISS + BM25 + Rerank） | `w3/sop_hub` | 通过 `agent_runtime.py` 的 `sys.path` 注入复用 |
-| FastAPI / SSE 主结构 | `w5/backend/main.py` | 拷贝并按 v6 的工具可见性、持久化端点改造 |
-| 工具轨迹回调 / LLM 调用计数 | `w5/backend/{tool_trace_callback, perf_callbacks}.py` | 通过 `sys.path` 直接 import，不复制一份 |
-| Streamlit 前端骨架 | `w5/frontend/app.py` | 改造增加「最近 SQL」侧栏 + 顶部 expander |
+讲解点：
+- 先走 `data_analyst_node` 查询指标；
+- 再把指标传给 `compliance_expert_node` 检索措施；
+- 最后 `synthesis_node` 汇总。
 
-## 新增模块
+### 场景 B：人工审批中断
+提问：
+> [force_approval] 请给出库存削减建议并先人工审批
 
-| 模块 | 作用 |
-|------|------|
-| `db_config.py` | MySQL URL 构造、读写/只读 Engine 单例、`before_cursor_execute` 兜底拦截写操作 |
-| `sql_history.py` | `SQLChatMessageHistory` 工厂 + 读/清/列出会话辅助 |
-| `sql_agent_tool.py` | `create_sql_agent` 内层 Agent + 系统提示「只允许 SELECT」+ `@tool` 包装 + 透传 callbacks |
-| `import_csv_to_mysql.py` | 一次性把 `w3/sop_knowledge/data.csv` 导入 `sales_performance`，并合成 `region / store_code` |
+讲解点：
+- 流程被 `interrupt` 挂起；
+- 前端出现审批按钮；
+- 点击“同意/驳回/修改”后 `/graph/resume` 继续。
 
-## 故障排查
+### 场景 C：稳定性与安全
+- 展示 SQL 只读防护（拒绝 DELETE/UPDATE）。
+- 展示 `node_trace` 与 `pending approvals` 队列。
 
-- **`pymysql` 报 `Authentication plugin 'caching_sha2_password' cannot be loaded`**：已在 `requirements.txt` 引入 `cryptography`；如仍报错，把 MySQL 账号改成 `mysql_native_password` 鉴权。
-- **后端启动报 `请在仓库 w3/.env 或环境变量中配置 api_key 与 base_url`**：与 w4/w5 一致，沿用同一份 `w3/.env`。
-- **SQL Agent 总在自检阶段报 `SQLWriteAttempt`**：这是兜底防护在工作；说明模型生成了非 SELECT 语句，重新组织问句即可，模型会在下一轮自动改写为 SELECT。
-- **页面刷新后历史消失**：检查 URL 是否带 `?sid=...`；以及 MySQL `chat_messages` 表是否有该 `session_id` 的记录（`SELECT session_id, COUNT(*) FROM chat_messages GROUP BY session_id;`）。
+---
+
+## 9. 企业级防护与可维护性
+
+- **零写操作防护（数据库）**
+  - LLM 提示词禁止写 SQL
+  - SQL 预检拒绝危险关键字
+  - SQLAlchemy `before_cursor_execute` 兜底拦截
+- **可恢复执行（流程）**
+  - LangGraph checkpoint（sqlite）持久化线程状态
+- **可观测性**
+  - `node_trace`、`/graph/state`、`/graph/pending_approvals`
+- **兼容回退**
+  - 保留 `/chat` 与 `/chat/stream`，迁移风险低
+
+---
+
+## 10. 验收标准映射
+
+1) **绝对稳定**：有状态图与条件边，避免单体 Agent 无限制工具循环。  
+2) **人工干预**：审批中断可视化，可恢复。  
+3) **企业级规范**：代码分层明确、接口完整、日志与诊断接口可用、带冒烟测试。
+
+---
+
+## 11. 下一步优化（可做加分项）
+
+- 把 `pending approvals` 做成独立管理页（分页 + 检索 + SLA）。
+- 引入 Prometheus 指标（节点耗时、审批等待时长）。
+- 增加 `pytest` 集成测试，纳入 CI。

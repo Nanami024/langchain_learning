@@ -65,6 +65,22 @@ def _reset_backend_session(api_base: str, session_id: str) -> None:
         pass
 
 
+def _fetch_pending_approvals(api_base: str, limit: int = 20) -> list[dict]:
+    try:
+        sess = _http_session(api_base)
+        r = sess.get(
+            f"{api_base.rstrip('/')}/graph/pending_approvals",
+            params={"limit": int(limit)},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        items = data.get("items") or []
+        return [x for x in items if isinstance(x, dict)]
+    except requests.RequestException:
+        return []
+
+
 def _render_inputs_for_tool(tool_name: str, inputs: str) -> str:
     """根据工具名渲染入参；`sql_db_query` 用 ```sql 高亮，其它走纯文本块。"""
     inputs = (inputs or "")[:3000]
@@ -120,6 +136,39 @@ def _chat_non_stream(api_base: str, session_id: str, message: str) -> tuple[str,
             obs = str(row.get("observation", ""))
             trace_md += f"\n**◀ `{last_tool}` 观测**\n```\n{obs}\n```\n"
     return out, trace_md, sqls
+
+
+def _graph_chat(api_base: str, session_id: str, message: str) -> dict:
+    sess = _http_session(api_base)
+    r = sess.post(
+        f"{api_base.rstrip('/')}/graph/chat",
+        json={"session_id": session_id, "message": message},
+        timeout=600,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _graph_resume(api_base: str, session_id: str, decision: str) -> dict:
+    sess = _http_session(api_base)
+    r = sess.post(
+        f"{api_base.rstrip('/')}/graph/resume",
+        json={"session_id": session_id, "decision": decision},
+        timeout=600,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _graph_state(api_base: str, session_id: str) -> dict:
+    sess = _http_session(api_base)
+    r = sess.get(
+        f"{api_base.rstrip('/')}/graph/state",
+        params={"session_id": session_id},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()
 
 
 def _chat_stream(
@@ -247,6 +296,9 @@ if "session_id" not in st.session_state:
     raw = (st.query_params.get("sid") or "").strip()
     st.session_state.session_id = raw if raw else str(uuid.uuid4())
 
+if "pending_approval" not in st.session_state:
+    st.session_state.pending_approval = None
+
 if not (st.query_params.get("sid") or "").strip():
     st.query_params["sid"] = st.session_state.session_id
 
@@ -261,6 +313,7 @@ if st.session_state.get("_history_sync_sid") != st.session_state.session_id:
     st.session_state._history_sync_sid = st.session_state.session_id
 
 use_stream = st.sidebar.toggle("流式输出（SSE）", value=True)
+use_langgraph = st.sidebar.toggle("LangGraph 多智能体模式", value=True)
 st.sidebar.caption(
     f"会话 ID：`{st.session_state.session_id}`\n\n"
     "记忆已写入 MySQL，**重启后端 + 刷新页面**仍可续接对话；"
@@ -272,6 +325,10 @@ tool_sidebar = st.sidebar.empty()
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛢️ Text-to-SQL（最近一次）")
 sql_sidebar = st.sidebar.empty()
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧑‍⚖️ 人工审批（HITL）")
+approval_sidebar = st.sidebar.empty()
+refresh_pending = st.sidebar.button("刷新待审批队列")
 
 if st.sidebar.button("新对话（清空 MySQL 中本会话历史）"):
     _reset_backend_session(api_base, st.session_state.session_id)
@@ -279,15 +336,75 @@ if st.sidebar.button("新对话（清空 MySQL 中本会话历史）"):
     st.session_state.session_id = str(uuid.uuid4())
     st.query_params["sid"] = st.session_state.session_id
     st.session_state.pop("_history_sync_sid", None)
+    st.session_state.pending_approval = None
     tool_sidebar.markdown("_等待提问…_")
     sql_sidebar.markdown("_等待提问…_")
+    approval_sidebar.markdown("_当前无待审批项_")
     st.rerun()
+
+pending = st.session_state.get("pending_approval")
+if pending:
+    reason = str((pending or {}).get("reason") or "检测到高风险建议，等待人工确认。")
+    rec = str((pending or {}).get("recommendation") or "")
+    approval_sidebar.markdown(f"**待审批原因**：{reason}")
+    if rec.strip():
+        st.sidebar.markdown("**建议摘要**")
+        st.sidebar.code(rec[:800], language="markdown")
+
+    c1, c2, c3 = st.sidebar.columns(3)
+    clicked = None
+    if c1.button("同意", key="approve_btn"):
+        clicked = "approved"
+    if c2.button("驳回", key="reject_btn"):
+        clicked = "rejected"
+    if c3.button("修改", key="revise_btn"):
+        clicked = "revise"
+
+    if clicked:
+        try:
+            resp = _graph_resume(api_base, st.session_state.session_id, clicked)
+            out = str(resp.get("output") or "").strip()
+            if out:
+                st.session_state.messages.append({"role": "assistant", "content": out})
+            st.session_state.pending_approval = None
+            st.rerun()
+        except requests.RequestException as e:
+            st.sidebar.error(f"审批提交失败：{e}")
+else:
+    approval_sidebar.markdown("_当前无待审批项_")
+
+pending_items = _fetch_pending_approvals(api_base, limit=20) if (refresh_pending or use_langgraph) else []
+if pending_items:
+    st.sidebar.markdown("**全局待审批会话**")
+    lines = []
+    for item in pending_items[:10]:
+        sid = str(item.get("session_id") or "")[:10]
+        reason = str(item.get("reason") or "等待审批")
+        lines.append(f"- `{sid}...` · {reason}")
+    st.sidebar.markdown("\n".join(lines))
+else:
+    st.sidebar.caption("全局待审批：0")
 
 st.title("S&OP 智能决策中枢 v6.0 · 数据驱动版")
 st.caption(
     "记忆持久化（MySQL · SQLChatMessageHistory） · "
     "Text-to-SQL（SQLDatabaseToolkit · 仅 SELECT） · 流式回答 · SSE 工具轨迹"
 )
+
+if use_langgraph:
+    with st.expander("📊 当前 LangGraph 线程状态", expanded=False):
+        try:
+            s = _graph_state(api_base, st.session_state.session_id)
+            st.json(
+                {
+                    "status": s.get("status"),
+                    "brief": s.get("brief"),
+                    "interrupt": s.get("interrupt"),
+                    "node_trace_len": len(s.get("node_trace") or []),
+                }
+            )
+        except requests.RequestException as e:
+            st.warning(f"读取图状态失败：{e}")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -311,7 +428,36 @@ if prompt := st.chat_input("请输入您的问题…（试试：华东区上个�
         tool_sidebar.markdown("_运行中…_")
         sql_sidebar.markdown("_运行中…_")
         try:
-            if use_stream:
+            if use_langgraph:
+                resp = _graph_chat(api_base, st.session_state.session_id, prompt)
+                status = str(resp.get("status") or "")
+                node_trace = resp.get("node_trace") or []
+                brief = resp.get("brief") or {}
+                tool_md_acc = ""
+                for row in node_trace:
+                    node = str((row or {}).get("node") or "")
+                    detail = str((row or {}).get("detail") or "")
+                    tool_md_acc += f"- `{node}`: {detail}\n"
+                if isinstance(brief, dict) and brief:
+                    tool_md_acc += (
+                        f"\n- `route_plan`: {brief.get('route_plan')}\n"
+                        f"- `intent`: {brief.get('intent')}\n"
+                        f"- `requires_human_approval`: {brief.get('requires_human_approval')}\n"
+                    )
+                if status == "interrupted":
+                    intr = resp.get("interrupt") or {}
+                    st.session_state.pending_approval = intr
+                    reason = str((intr or {}).get("reason") or "等待人工审批。")
+                    assistant_text = f"流程已暂停，等待人工审批。\n\n原因：{reason}"
+                    ph.info(assistant_text)
+                    sql_ph.markdown("_LangGraph 模式下 SQL 在节点结果中查看_")
+                else:
+                    st.session_state.pending_approval = None
+                    assistant_text = str(resp.get("output") or "").strip()
+                    ph.markdown(assistant_text or "_本轮无输出_")
+                    sql_ph.markdown("_LangGraph 模式下 SQL 在节点结果中查看_")
+                tool_ph.markdown(tool_md_acc or "_本回合无节点轨迹_")
+            elif use_stream:
                 assistant_text, tool_md_acc, sqls_acc = _chat_stream(
                     api_base,
                     st.session_state.session_id,
